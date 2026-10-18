@@ -80,15 +80,19 @@ export const PhotoZoomModal: React.FC<PhotoZoomModalProps> = ({
               Voltar
             </button>
             <button
-              disabled={!product.available}
+              disabled={product.available === false}
               onClick={() => {
                 onClose();
                 onAdd(product);
               }}
-              className="flex-1 min-h-[48px] py-3.5 px-6 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-stone-950 font-black text-base sm:text-lg shadow-md transition flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+              className={`flex-1 min-h-[48px] py-3.5 px-6 rounded-xl font-black text-base sm:text-lg shadow-md transition flex items-center justify-center gap-2 ${
+                product.available !== false
+                  ? 'bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-stone-950 cursor-pointer active:scale-95'
+                  : 'bg-stone-200 text-stone-500 cursor-not-allowed'
+              }`}
             >
               <Plus className="w-5 h-5 stroke-[2.5]" />
-              <span>{product.available ? 'Personalizar e Adicionar' : 'Produto Esgotado'}</span>
+              <span>{product.available !== false ? 'Personalizar e Adicionar' : 'Produto Esgotado'}</span>
             </button>
           </div>
         </div>

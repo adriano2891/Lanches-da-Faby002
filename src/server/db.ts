@@ -572,6 +572,7 @@ class Database {
     // Also remove from experiment section if present
     this.data.config.experimentProductIds = this.data.config.experimentProductIds.filter(pid => pid !== id);
     if (this.data.products.length !== initialLen) {
+      this.data.config.updatedAt = Date.now();
       this.saveData(this.data);
       return true;
     }

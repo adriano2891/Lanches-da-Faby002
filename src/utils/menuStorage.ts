@@ -48,6 +48,34 @@ export function setCustomApiBaseUrl(url: string) {
   } catch {}
 }
 
+const LOCAL_DELETED_PRODUCTS_KEY = 'faby_deleted_product_ids_v1';
+
+export function getDeletedProductIds(): string[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_DELETED_PRODUCTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function addDeletedProductId(id: string): void {
+  try {
+    const current = getDeletedProductIds();
+    if (!current.includes(id)) {
+      current.push(id);
+      localStorage.setItem(LOCAL_DELETED_PRODUCTS_KEY, JSON.stringify(current));
+    }
+  } catch {}
+}
+
+export function removeDeletedProductId(id: string): void {
+  try {
+    const current = getDeletedProductIds().filter((d) => d !== id);
+    localStorage.setItem(LOCAL_DELETED_PRODUCTS_KEY, JSON.stringify(current));
+  } catch {}
+}
+
 /**
  * Checks if a photo URL looks valid and not like a broken dummy or missing local upload
  */
@@ -104,9 +132,10 @@ export function getLocalMenuData(): { config: StoreConfig; products: Product[]; 
           }
         });
 
-        const mergedProducts = Array.from(productMap.values()).sort(
-          (a, b) => (a.order || 99) - (b.order || 99)
-        );
+        const deletedIds = new Set(getDeletedProductIds());
+        const mergedProducts = Array.from(productMap.values())
+          .filter((p) => !deletedIds.has(p.id))
+          .sort((a, b) => (a.order || 99) - (b.order || 99));
 
         const result = {
           config: { ...DEFAULT_CONFIG, ...parsed.config, version: CURRENT_DATA_VERSION },
@@ -121,9 +150,10 @@ export function getLocalMenuData(): { config: StoreConfig; products: Product[]; 
     console.warn('Could not read local menu cache:', e);
   }
 
+  const deletedIds = new Set(getDeletedProductIds());
   const defaultResult = {
     config: { ...DEFAULT_CONFIG, version: CURRENT_DATA_VERSION },
-    products: [...DEFAULT_PRODUCTS],
+    products: DEFAULT_PRODUCTS.filter((p) => !deletedIds.has(p.id)),
     additionals: [...DEFAULT_ADDITIONALS],
   };
   inMemoryCache = defaultResult;
@@ -181,6 +211,7 @@ export function saveLocalMenuData(data: {
  * Update a specific product directly in local cache
  */
 export function updateLocalProduct(id: string, updates: Partial<Product>): Product[] {
+  removeDeletedProductId(id);
   const current = getLocalMenuData();
   const index = current.products.findIndex((p) => p.id === id);
   let updatedProducts: Product[];
@@ -197,6 +228,23 @@ export function updateLocalProduct(id: string, updates: Partial<Product>): Produ
   }
 
   saveLocalMenuData({ products: updatedProducts });
+  return updatedProducts;
+}
+
+/**
+ * Delete a product locally, recording it in deleted product ids to prevent resurrection
+ */
+export function deleteLocalProduct(id: string): Product[] {
+  addDeletedProductId(id);
+  const current = getLocalMenuData();
+  const updatedProducts = current.products.filter((p) => p.id !== id);
+  const updatedExperimentIds = (current.config.experimentProductIds || []).filter((pid) => pid !== id);
+  const updatedConfig: StoreConfig = {
+    ...current.config,
+    experimentProductIds: updatedExperimentIds,
+    updatedAt: Date.now(),
+  };
+  saveLocalMenuData({ config: updatedConfig, products: updatedProducts });
   return updatedProducts;
 }
 
@@ -246,14 +294,16 @@ export async function fetchMenuDataWithFallback(): Promise<MenuDataResponse> {
         if (res.ok && contentType.includes('application/json')) {
           const data = await res.json();
           if (data && data.config && Array.isArray(data.products) && data.products.length > 0) {
-            const serverProducts = data.products as Product[];
+            const deletedIds = new Set(getDeletedProductIds());
+            const serverProducts = (data.products as Product[]).filter((p) => !deletedIds.has(p.id));
             const serverIds = new Set(serverProducts.map((p) => p.id));
 
             // CRITICAL: Merge products using updatedAt timestamp!
-            // If the user modified a product locally (e.g. uploaded a new photo or edited description),
+            // If the user modified a product locally (e.g. availability or new photo),
             // NEVER overwrite it with an older copy from static JSON!
             const local = getLocalMenuData();
-            const localMap = new Map((local.products || []).map((p) => [p.id, p]));
+            const localProducts = (local.products || []).filter((p) => !deletedIds.has(p.id));
+            const localMap = new Map(localProducts.map((p) => [p.id, p]));
 
             const mergedProducts: Product[] = serverProducts.map((serverProd) => {
               const localProd = localMap.get(serverProd.id);
@@ -264,7 +314,7 @@ export async function fetchMenuDataWithFallback(): Promise<MenuDataResponse> {
             });
 
             // Retain any custom offline-created products not present in server
-            (local.products || []).forEach((localProd) => {
+            localProducts.forEach((localProd) => {
               if (localProd.id && !serverIds.has(localProd.id)) {
                 mergedProducts.push(localProd);
               }

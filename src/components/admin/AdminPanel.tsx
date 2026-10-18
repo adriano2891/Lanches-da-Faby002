@@ -42,6 +42,10 @@ import {
   saveLocalAdminCreds,
   getApiBaseUrl,
   setCustomApiBaseUrl,
+  updateLocalProduct,
+  deleteLocalProduct,
+  addDeletedProductId,
+  removeDeletedProductId,
 } from '../../utils/menuStorage.ts';
 import { getProductImageUrl, clearProductImageCaches } from '../../utils/imageUrl.ts';
 
@@ -906,9 +910,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           allowedAdditionalIds: cleanProductData.allowedAdditionalIds,
           updatedAt: savedProduct?.updatedAt || now,
         } as Product;
+        removeDeletedProductId(editingProduct.id);
         productMap.set(editingProduct.id, finalProduct);
       } else {
         const targetId = savedProduct?.id || `prod_${now}_${Math.random().toString(36).substring(2, 6)}`;
+        removeDeletedProductId(targetId);
         const newProduct: Product = {
           id: targetId,
           name: cleanProductData.name!,
@@ -965,63 +971,93 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Confirm Product Deletion
   const confirmDeleteProduct = async () => {
-    if (!authToken || !productToDelete) return;
+    if (!productToDelete) return;
     setIsDeleting(true);
+    const targetId = productToDelete.id;
+    const deletedName = productToDelete.name;
+
     try {
-      try {
-        await fetch(`/api/admin/products/${productToDelete.id}`, {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-      } catch {
-        // Fallback for Netlify / static host
+      // 1. Permanently remove locally and register in deleted IDs to prevent static cache resurrection
+      deleteLocalProduct(targetId);
+
+      // 2. Clear modal state & close edit modal if editing the deleted product
+      setProductToDelete(null);
+      if (editingProduct?.id === targetId) {
+        setEditingProduct(null);
+        setIsCreatingProduct(false);
       }
 
-      const current = getLocalMenuData();
-      const updatedProducts = current.products.filter((p) => p.id !== productToDelete.id);
-      saveLocalMenuData({ products: updatedProducts });
+      // 3. Sync deletion to backend API if available
+      if (authToken) {
+        try {
+          await fetch(`${getApiBaseUrl()}/api/admin/products/${targetId}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${authToken}` },
+          });
+        } catch (err) {
+          console.warn('[Admin] Server delete unreachable or static hosting, preserved locally:', err);
+        }
+      }
 
-      const deletedName = productToDelete.name;
-      setProductToDelete(null);
+      // 4. Refresh across the app
       await onRefreshData();
       showToast(`Produto "${deletedName}" removido com sucesso!`, 'success');
     } catch (e: any) {
+      console.error('Error removing product:', e);
       showToast(e.message || 'Erro ao remover produto.', 'error');
     } finally {
       setIsDeleting(false);
     }
   };
 
-  // Toggle Product Availability
+  // Toggle Product Availability (Disponível / Esgotado)
   const handleToggleProductAvailability = async (product: Product) => {
-    if (!authToken) return;
+    const isCurrentlyAvailable = product.available !== false;
+    const nextAvailable = !isCurrentlyAvailable;
+    const now = Date.now();
+
     try {
-      try {
-        await fetch(`/api/admin/products/${product.id}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({ available: !product.available }),
-        });
-      } catch {
-        // Fallback for Netlify / static host
-      }
+      // 1. Immediate optimistic local update with fresh updatedAt timestamp
+      updateLocalProduct(product.id, {
+        available: nextAvailable,
+        updatedAt: now,
+      });
 
-      const current = getLocalMenuData();
-      const updatedProducts = current.products.map((p) =>
-        p.id === product.id ? { ...p, available: !p.available } : p
-      );
-      saveLocalMenuData({ products: updatedProducts });
-
+      // 2. Refresh views across the app immediately
       await onRefreshData();
       showToast(
-        `Produto "${product.name}" agora está ${!product.available ? 'Disponível' : 'Esgotado'}.`,
+        `Produto "${product.name}" marcado como ${nextAvailable ? 'Disponível' : 'Esgotado'}.`,
         'success'
       );
-    } catch (e) {
-      console.warn(e);
+
+      // 3. Persist to backend server if available
+      if (authToken) {
+        try {
+          const res = await fetch(`${getApiBaseUrl()}/api/admin/products/${product.id}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${authToken}`,
+            },
+            body: JSON.stringify({ available: nextAvailable, updatedAt: now }),
+          });
+
+          if (res.ok) {
+            const saved = await res.json().catch(() => null);
+            if (saved && saved.updatedAt) {
+              updateLocalProduct(product.id, {
+                available: saved.available !== false,
+                updatedAt: saved.updatedAt,
+              });
+            }
+          }
+        } catch (serverErr) {
+          console.warn('[Admin] Server sync warning for availability toggle (saved locally):', serverErr);
+        }
+      }
+    } catch (e: any) {
+      console.warn('Error toggling availability:', e);
+      showToast('Erro ao atualizar disponibilidade.', 'error');
     }
   };
 
@@ -1486,13 +1522,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                               available: editingProduct.available === false,
                             })
                           }
-                          className={`px-3.5 py-1.5 rounded-xl font-black text-xs transition cursor-pointer shadow-2xs shrink-0 whitespace-nowrap ${
+                          className={`px-3.5 py-2 rounded-xl font-black text-xs transition cursor-pointer shadow-2xs shrink-0 flex items-center gap-2 select-none active:scale-95 ${
                             editingProduct.available !== false
-                              ? 'bg-emerald-700 hover:bg-emerald-800 text-white'
-                              : 'bg-rose-700 hover:bg-rose-800 text-white'
+                              ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                              : 'bg-rose-600 hover:bg-rose-700 text-white'
                           }`}
+                          title={editingProduct.available !== false ? 'Clique para marcar como Esgotado' : 'Clique para marcar como Disponível'}
                         >
-                          {editingProduct.available !== false ? 'Publicado (Ativo)' : 'Marcar Ativo'}
+                          <span className={`w-2.5 h-2.5 rounded-full ${editingProduct.available !== false ? 'bg-emerald-200 animate-pulse' : 'bg-rose-200'}`} />
+                          <span>{editingProduct.available !== false ? 'Disponível (Mudar p/ Esgotado)' : 'Esgotado (Mudar p/ Disponível)'}</span>
                         </button>
                       </div>
 
@@ -1966,17 +2004,31 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                         </div>
 
                         {/* Modal Footer Sticky */}
-                        <div className="p-4 bg-stone-100 border-t border-stone-200 flex items-center justify-end gap-3 shrink-0 sticky bottom-0 z-10 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] sm:shadow-none">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingProduct(null);
-                              setIsCreatingProduct(false);
-                            }}
-                            className="px-4 py-2.5 rounded-xl border border-stone-300 hover:bg-stone-200 text-stone-700 font-bold text-xs sm:text-sm transition cursor-pointer"
-                          >
-                            Cancelar
-                          </button>
+                        <div className="p-4 bg-stone-100 border-t border-stone-200 flex items-center justify-between gap-3 shrink-0 sticky bottom-0 z-10 shadow-[0_-4px_12px_rgba(0,0,0,0.06)] sm:shadow-none">
+                          <div>
+                            {!isCreatingProduct && editingProduct?.id && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteProduct(editingProduct.id)}
+                                className="px-3.5 py-2.5 rounded-xl bg-rose-100 hover:bg-rose-200 active:scale-95 text-rose-800 border border-rose-300 font-black text-xs sm:text-sm flex items-center gap-1.5 transition cursor-pointer shadow-2xs"
+                                title={`Remover permanentemente ${editingProduct.name}`}
+                              >
+                                <Trash2 className="w-4 h-4 text-rose-600 shrink-0" />
+                                <span>Remover Produto</span>
+                              </button>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingProduct(null);
+                                setIsCreatingProduct(false);
+                              }}
+                              className="px-4 py-2.5 rounded-xl border border-stone-300 hover:bg-stone-200 text-stone-700 font-bold text-xs sm:text-sm transition cursor-pointer"
+                            >
+                              Cancelar
+                            </button>
                           <button
                             type="button"
                             disabled={uploadingImage || isSavingProduct}
@@ -2245,19 +2297,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                             </div>
 
                             <div className="flex items-center gap-1.5 sm:gap-2 w-full sm:w-auto pt-2.5 sm:pt-0 border-t border-stone-100 sm:border-0 justify-between sm:justify-end">
-                              {/* Botão Disponibilidade */}
+                              {/* Botão Disponibilidade (Disponível / Esgotado) */}
                               <button
                                 type="button"
                                 onClick={() => handleToggleProductAvailability(p)}
-                                className={`flex-1 sm:flex-initial px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs whitespace-nowrap ${
-                                  p.available
-                                    ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-900 border border-emerald-300'
-                                    : 'bg-rose-100 hover:bg-rose-200 text-rose-900 border border-rose-300'
+                                className={`flex-1 sm:flex-initial px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-xs font-black transition flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs whitespace-nowrap active:scale-95 select-none ${
+                                  p.available !== false
+                                    ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-950 border border-emerald-300'
+                                    : 'bg-rose-100 hover:bg-rose-200 text-rose-950 border border-rose-300'
                                 }`}
-                                title={p.available ? 'Clique para marcar como esgotado' : 'Clique para marcar como disponível'}
+                                title={p.available !== false ? 'Clique para marcar como Esgotado' : 'Clique para marcar como Disponível'}
                               >
-                                <span className={`w-2 h-2 rounded-full ${p.available ? 'bg-emerald-600' : 'bg-rose-600'}`}></span>
-                                <span>{p.available ? 'Disponível' : 'Esgotado'}</span>
+                                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${p.available !== false ? 'bg-emerald-600 animate-pulse' : 'bg-rose-600'}`} />
+                                <span>{p.available !== false ? 'Disponível' : 'Esgotado'}</span>
                               </button>
 
                               {/* Botão EDITAR ATIVO */}
